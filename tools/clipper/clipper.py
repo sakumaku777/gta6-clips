@@ -292,7 +292,7 @@ def transcribe(model, video):
     return words, info.language
 
 
-def render(video, words, out, title="", gross=True):
+def render(video, words, out, title="", gross=True, dauer=None):
     """gross=True: Gameplay gross (1080x1240, Mitte des Bildes, leicht gezoomt), damit man sieht,
     wie gut GTA 6 aussieht. gross=False: altes Layout mit ganzem 16:9-Bild klein in der Mitte."""
     out.parent.mkdir(exist_ok=True)
@@ -319,7 +319,7 @@ def render(video, words, out, title="", gross=True):
     run(["ffmpeg", "-v", "error", "-y", "-i", video.resolve(), "-filter_complex", vf,
          "-map", "[v]", "-map", "0:a?", "-c:v", "libx264", "-preset", "fast",
          "-crf", "18", "-c:a", "aac", "-b:a", "160k", "-r", "30", "-movflags", "+faststart",
-         out.name], cwd=out.parent)
+         *(["-t", f"{dauer:.2f}"] if dauer else []), out.name], cwd=out.parent)
     return n
 
 
@@ -334,7 +334,7 @@ def facecam_box(video):
     return boxes.get(video.stem.rsplit("_", 1)[0].lower())
 
 
-def render_facecam(video, words, out, box, title=""):
+def render_facecam(video, words, out, box, title="", dauer=None):
     """Hochkant-Layout wie im Beispiel: Facecam oben, Hook-Box auf der Naht, Gameplay unten."""
     out.parent.mkdir(exist_ok=True)
     ass = out.with_suffix(".ass")
@@ -363,7 +363,7 @@ def render_facecam(video, words, out, box, title=""):
     run(["ffmpeg", "-v", "error", "-y", "-i", video.resolve(), "-filter_complex", vf,
          "-map", "[v]", "-map", "0:a?", "-c:v", "libx264", "-preset", "fast",
          "-crf", "18", "-c:a", "aac", "-b:a", "160k", "-r", "30", "-movflags", "+faststart",
-         out.name], cwd=out.parent)
+         *(["-t", f"{dauer:.2f}"] if dauer else []), out.name], cwd=out.parent)
     return n
 
 
@@ -489,6 +489,23 @@ def cmd_prepare(a):
           "schlechte Clips bei 'behalten' auf 'nein' setzen, speichern, dann rendern.")
 
 
+def schwarz_ende(video, rest=0.5):
+    """Endet der Clip mit Schwarzbild + Stille (z.B. nach 'Ausser Gefecht'/'Wasted'), wird dort gekuerzt.
+    Gibt neue Laenge zurueck oder None. Schwarz zaehlt nur, wenn es >= 1 s bis zum Ende reicht."""
+    d = duration(video)
+    r = subprocess.run(["ffmpeg", "-hide_banner", "-i", str(video), "-vf",
+                        "blackdetect=d=1:pix_th=0.10:pic_th=0.85", "-an", "-f", "null", "-"],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    starts = [(float(m.group(1)), float(m.group(2))) for m in
+              re.finditer(r"black_start:([\d.]+) black_end:([\d.]+)", r.stderr)]
+    if not starts:
+        return None
+    b0, b1 = starts[-1]
+    if d - b1 > 0.3 or b0 < 8:
+        return None
+    return round(b0 + rest, 2)
+
+
 def cmd_render(a):
     need("ffmpeg")
     review, meta = read_review(), clip_meta()
@@ -511,17 +528,25 @@ def cmd_render(a):
         title = "" if a.no_title else (r.get("hook") or "").strip() or \
             meta.get(f.stem.rsplit("_", 1)[-1], {}).get("title", "")
         print(f"    Hook: {title or '(keiner)'}")
+        dauer = schwarz_ende(f)
+        if dauer:
+            print(f"    Schwarzbild am Ende: kuerze auf {dauer:.1f}s")
+        q = quelle_check(f)
+        if q:
+            print(f"    WARNUNG Quelle unscharf: {q}")
         box = facecam_box(f) if a.layout == "facecam" else None
         if box:
             print("    Layout: Facecam oben, Gameplay unten")
-            n = render_facecam(f, words, OUT / f.name, box, title=title)
+            n = render_facecam(f, words, OUT / f.name, box, title=title, dauer=dauer)
         else:
             if a.layout == "facecam":
                 print("    keine Facecam-Position in facecam.json, nehme normales Layout")
-            n = render(f, words, OUT / f.name, title=title, gross=a.layout != "klein")
+            n = render(f, words, OUT / f.name, title=title, gross=a.layout != "klein", dauer=dauer)
         d_in, d_out = duration(f), duration(OUT / f.name)
         print(f"    -> out/{f.name}  ({d_out:.1f}s, {n} Text-Zeilen, Sprache {lang}, "
               f"{time.time() - t0:.0f}s Rechenzeit)")
+        if dauer:
+            d_in = min(d_in, dauer)
         if abs(d_in - d_out) > 0.3:
             print(f"    WARNUNG: Laenge passt nicht! raw {d_in:.2f}s vs out {d_out:.2f}s")
 
