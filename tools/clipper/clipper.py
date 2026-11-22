@@ -561,6 +561,28 @@ def vod_info(vid):
             "length": v.get("lengthSeconds"), "chapters": chapters}
 
 
+def quelle_check(path):
+    """Mindestqualitaet der Quelle: 1080p, h264/hevc, >= 2.5 Mbit/s. Gibt Problemtext oder '' zurueck."""
+    try:
+        r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                            "stream=codec_name,height,bit_rate:format=bit_rate,duration,size",
+                            "-of", "json", str(path)], capture_output=True, text=True)
+        d = json.loads(r.stdout or "{}")
+        st, fm = (d.get("streams") or [{}])[0], d.get("format", {})
+        h, codec = int(st.get("height") or 0), st.get("codec_name", "?")
+        br = int(st.get("bit_rate") or fm.get("bit_rate") or 0)
+    except Exception as e:
+        return f"nicht pruefbar ({e})"
+    probs = []
+    if codec not in ("h264", "hevc"):
+        probs.append(f"Codec {codec}")
+    if h < 1080:
+        probs.append(f"nur {h}p")
+    if br and br < 2_500_000:
+        probs.append(f"nur {br // 1000} kbit/s")
+    return ", ".join(probs)
+
+
 def cmd_chatvod(a):
     """VOD -> Chat-Replay -> Spikes -> nur diese Abschnitte laden (kein ganzes VOD, keine Tokens)."""
     import chatspike as cs
@@ -622,9 +644,15 @@ def cmd_chatvod(a):
             opts = {"outtmpl": str(name.with_suffix(".%(ext)s")),
                     "format": "best[height<=1080][ext=mp4]/best[height<=1080]/best",
                     "download_ranges": download_range_func(None, [(p["start"], p["end"])]),
-                    "force_keyframes_at_cuts": True, "quiet": True, "no_warnings": True}
+                    # KEIN force_keyframes_at_cuts: das liess ffmpeg mit Standard-Encoder (mpeg2, ~200 kbit/s)
+                    # neu kodieren -> Klötzchen. Jetzt verlustfreie Kopie (Start bis ~2 s früher am Keyframe).
+                    "quiet": True, "no_warnings": True,
+                    "external_downloader_args": {"ffmpeg_o": ["-c", "copy"]}}
             with yt_dlp.YoutubeDL(opts) as y:
                 y.download([f"https://www.twitch.tv/videos/{vid}"])
+        q = quelle_check(name)
+        if q:
+            print(f"   WARNUNG Bildqualitaet: {q}")
         cs.save_meta(channel, {"id": cid, "title": "", "info": f"Chat-Spike {cs.fmt(p['moment'])}",
                                "url": f"https://www.twitch.tv/videos/{vid}?t={int(p['start'])}s",
                                "duration": round(p["end"] - p["start"], 1), "views": "", "channel": channel,
